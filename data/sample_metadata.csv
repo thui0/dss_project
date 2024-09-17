@@ -1,0 +1,15 @@
+,genotype,treatment,batch
+D1,WT,noDSS,batch1
+D3,WT,noDSS,batch1
+Z3,WT,noDSS,batch1
+MP2,WT,noDSS,batch3
+Z1,KO,noDSS,batch1
+Z2,KO,noDSS,batch1
+MS1,KO,noDSS,batch2
+MP1,KO,noDSS,batch3
+D7,WT,DSS,batch1
+D9,WT,DSS,batch1
+ZH2,WT,DSS,batch1
+D4,KO,DSS,batch1
+D5,KO,DSS,batch1
+D6,KO,DSS,batch1

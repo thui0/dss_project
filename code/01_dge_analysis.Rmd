@@ -1,0 +1,270 @@
+---
+title: "DSS Project Differential Gene Expression Analysis"
+author: "Thompson Hui"
+output: 
+  html_notebook:
+    toc: yes
+    toc_depth: 2
+    toc_float: yes
+---
+
+```{r, echo = F}
+library(knitr)
+library(formatR)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=I(80)),tidy=TRUE)
+```
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Main
+
+This notebook contains code to perform Differential Expression Analysis.
+
+# Libraries
+
+All libraries used in this analysis:
+
+```{r Libraries, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(DESeq2)
+library(ggrepel)
+library(org.Mm.eg.db)
+```
+
+# Output Directory
+
+```{r}
+out_dir <- file.path("results","dge_analysis")
+if (!dir.exists(out_dir)) {dir.create(out_dir, showWarnings = FALSE)}
+```
+
+# Setup DESeqDataSet Object
+
+```{r read in counts and metadata tables}
+# read in merged counts table
+cts <- read.csv(file = file.path("data","merged_counts_table.csv"), row.names = 1)
+head(cts)
+```
+
+```{r read in metadata table}
+# read in metadata
+coldata <- read.csv(file = file.path("data","sample_metadata.csv"), row.names = 1)
+coldata
+```
+
+```{r check sample order match}
+all(colnames(cts) %in% rownames(coldata))
+all(colnames(cts) == rownames(coldata))
+```
+
+```{r create DESeqDataSet Object}
+dds <- DESeqDataSetFromMatrix(countData = cts,
+                              colData = coldata,
+                              design = ~ batch + genotype + treatment + genotype:treatment
+                              )
+dds
+```
+
+# Check Smad4 (ENSMUSG00000024515) Normalized Counts
+
+```{r deseq plot smad4 counts}
+smad4 <- "ENSMUSG00000024515"
+smad4.count.data <- plotCounts(dds, gene = "ENSMUSG00000024515", intgroup = c("genotype","treatment"), returnData = T)
+smad4.count.data$names <- rownames(smad4.count.data)
+
+ggplot(smad4.count.data,aes(x=genotype:treatment, y=count)) + geom_point(position = position_jitter(w=0.1, h=0)) + scale_y_log10(breaks=c(500,800,1500,2500,3500)) + geom_text_repel(aes(label = names)) + theme_bw() + ggtitle("Smad4 (ENSMUSG00000024515)")
+ggsave(filename = file.path(out_dir, "Smad4_norm_counts_plot.pdf"))
+```
+
+Based on the plot of Smad4 normalized counts, we see that Sample `Z1` is an abnormal KO sample. We will drop this sample from the analysis.
+
+```{r drop sample Z1}
+# Z1 is the fifth sample
+dds <- dds[,-5]
+dds <- DESeq(dds)
+dds
+```
+
+plot Smad4 norm counts after dropping sample to verify correct sample has been dropped
+```{r new Smad4 plotCounts}
+smad4.count.data.new <- plotCounts(dds, gene = "ENSMUSG00000024515", intgroup = c("genotype","treatment"), returnData = T)
+smad4.count.data.new$names <- rownames(smad4.count.data.new)
+
+ggplot(smad4.count.data.new,aes(x=genotype:treatment, y=count)) + geom_point(position = position_jitter(w=0.1, h=0)) + scale_y_log10(breaks=c(500,800,1500,2500,3500)) + geom_text_repel(aes(label = names)) + theme_bw() + ggtitle("Smad4 (ENSMUSG00000024515)")
+ggsave(filename = file.path(out_dir, "Smad4_norm_counts_plot_after_drop.pdf"))
+```
+
+_____
+
+# Differential Expression Analysis
+
+## Set Factor Levels
+
+We should set `WT` to be reference level for the `genotype` factor. 
+
+```{r set genotype reference factor}
+dds$genotype <- factor(dds$genotype, c("WT","KO"))
+dds$genotype
+```
+
+We should set `noDSS` as reference level for the `treatment` factor.
+
+```{r set treatment reference factor}
+dds$treatment <- factor(dds$treatment, c("noDSS","DSS"))
+dds$treatment
+```
+
+## Run `DESeq()`
+
+```{r run deseq}
+design(dds) <- ~ batch + genotype + treatment + genotype:treatment
+dds <- DESeq(dds)
+```
+
+Check new design output and namespace of results:
+
+```{r dds resultsNames}
+resultsNames(dds)
+```
+
+Save `dds` as RDS
+
+```{r}
+saveRDS(dds, file = file.path(out_dir, "dds.rds"))
+```
+
+
+## Create helper function for DiffExp
+
+```{r}
+diffexp <- function(dds, contrast, comparison, outpath = file.path(out_dir, "diffexp"), name = NULL) {
+  if (!dir.exists(outpath)) {dir.create(outpath, showWarnings = FALSE, recursive = TRUE)}
+  # get results with independent filtering criteria \alpha = 0.05
+  if (is.null(contrast)) {
+    res <- results(dds, name = name, alpha = 0.05)
+  } else {
+    res <- results(dds, contrast = contrast, alpha = 0.05)
+  }
+  # map Ensembl IDs to Mouse Gene Symbols
+  res$mapIds <- mapIds(x = org.Mm.eg.db,
+                       keys = rownames(res),
+                       column = "SYMBOL",
+                       keytype = "ENSEMBL",
+                       multiVals = "first"
+                       )
+  # save res to files
+  res_filename <- file.path(outpath, comparison)
+  ## save to csv
+  write.csv(res, file = paste0(res_filename,".csv"), quote = F)
+  ## save to txt
+  write.table(res, file = paste0(res_filename,".txt"), sep = "\t", quote = F)
+  ## save to rds
+  saveRDS(object = res, file = paste0(res_filename,".rds"))
+  
+  # create summary file
+  sink(file = paste0(res_filename, "_summary.txt"))
+  summary(res)
+  sum(res$padj < 0.05 & res$log2FoldChange > 0, na.rm = T)
+  sum(res$padj < 0.05 & res$log2FoldChange < 0, na.rm = T)
+  sum(res$padj < 0.05, na.rm = T)
+  sink()
+  
+  # MA Plots
+  ma_fpath = file.path(out_dir, "ma_plots")
+  if (!dir.exists(ma_fpath)) {dir.create(ma_fpath, showWarnings = FALSE, recursive = TRUE)}
+  ma_fname = file.path(ma_fpath, paste0("MA_plot_", comparison))
+  ## save to pdf
+  pdf(file = paste0(ma_fname, ".pdf"))
+  plotMA(res, ylim=c(-4,4), main = gsub("_", " ", comparison))
+  dev.off()
+  ## save to jpeg
+  jpeg(filename = paste0(ma_fname, ".jpeg"), width = 10, height = 10, units = "in", res = 300)
+  plotMA(res, ylim=c(-4,4), main = gsub("_", " ", comparison))
+  dev.off()
+  ## save to png
+  png(filename = paste0(ma_fname, ".png"), width = 10, height = 10, units = "in", res = 300)
+  plotMA(res, ylim=c(-4,4), main = gsub("_", " ", comparison))
+  dev.off()
+  ## save to tiff
+  tiff(filename = paste0(ma_fname, ".tiff"), width = 10, height = 10, units = "in", res = 300, compression = "lzw")
+  plotMA(res, ylim=c(-4,4), main = gsub("_", " ", comparison))
+  dev.off()
+  
+}
+```
+
+## Perform DiffExp
+
+DiffExp contrast choices based off analysis as explained [here] (https://rstudio-pubs-static.s3.amazonaws.com/329027_593046fb6d7a427da6b2c538caf601e1.html)
+
+### KODSS vs KOnoDSS
+
+```{r diffexp KODSS vs KOnoDSS}
+diffexp(dds = dds, contrast = list(c("treatment_DSS_vs_noDSS","genotypeKO.treatmentDSS")), comparison = "KODSS_vs_KOnoDSS")
+```
+
+### KODSS vs WTDSS
+
+```{r diffexp KODSS vs WTDSS}
+diffexp(dds = dds, contrast = list(c("genotype_KO_vs_WT","genotypeKO.treatmentDSS")), comparison = "KODSS_vs_WTDSS")
+```
+
+### KODSS vs WTnoDSS
+
+```{r diffexp KODSS vs WTnoDSS}
+diffexp(dds = dds, contrast = list(c("genotype_KO_vs_WT", "treatment_DSS_vs_noDSS", "genotypeKO.treatmentDSS")), comparison = "KODSS_vs_WTnoDSS")
+```
+
+### KOnoDSS vs WTnoDSS
+
+```{r diffexp KOnoDSS vs WTnoDSS}
+diffexp(dds = dds, contrast = c("genotype","KO","WT"), comparison = "KOnoDSS_vs_WTnoDSS")
+```
+
+### WTDSS vs WTnoDSS
+
+```{r diffexp WTDSS vs WTnoDSS}
+diffexp(dds = dds, contrast = c("treatment","DSS","noDSS"), comparison = "WTDSS_vs_WTnoDSS")
+```
+
+
+### Across genotypes ("genotypeKO.treatmentDSS" interaction term)
+Find genes where the effect from treatment is different across genotypes (e.g., genes with positive log2FoldChanges here are upregulated in KO but downregulated in WT after DSS treatment)
+
+```{r}
+diffexp(dds = dds, contrast = NULL, name = c("genotypeKO.treatmentDSS"), comparison = "genotypeKO.treatmentDSS_interaction_term")
+```
+
+## Export Normalized Counts
+
+```{r get norm counts and export}
+norm.counts <- counts(dds, normalized = TRUE) |>  as.data.frame()
+# map gene names
+norm.counts$mapIds <- mapIds(x = org.Mm.eg.db,
+                             keys = rownames(norm.counts),
+                             column = "SYMBOL",
+                             keytype = "ENSEMBL"
+                             )
+norm.counts |>  head()
+
+norm_filename <- file.path(out_dir, "norm.counts")
+# save norm.counts to csv
+write.csv(norm.counts, file = paste0(norm_filename,".csv"))
+
+# save norm.counts to txt
+write.table(norm.counts, file = paste0(norm_filename,".txt"), sep = "\t")
+
+# save norm.counts to RDS
+saveRDS(norm.counts, file = paste0(norm_filename,".rds"))
+```
+
+_____
+
+# R Session Info
+```{r session info}
+sessionInfo()
+```
+

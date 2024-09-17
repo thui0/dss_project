@@ -1,0 +1,334 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Objective
+
+Generate heatmaps for DSS Regenerative Wang signature core-enriched genes. (Wang gene set constructed using only the bolded genes); with corresponding signal-to-noise enrichment score heatmap appended.
+
+# Required Packages
+```{r,warning=FALSE,message=FALSE}
+library(tidyverse)
+library(magrittr)
+library(tools)
+library(DESeq2)
+library(limma)
+library(org.Mm.eg.db)
+library(ComplexHeatmap)
+library(RColorBrewer)
+library(ggrepel)
+```
+
+## Prepare rlog with limma batch correction
+```{r}
+out <- file.path("figures", "heatmaps")
+if (!dir.exists(out)) {
+  dir.create(out, showWarnings = F, recursive = T)
+}
+
+# dds <- readRDS(file.path("results", "dge_analysis", "dds.rds"))
+# 
+# rld <- rlog(object = dds)
+# 
+# saveRDS(rld, file = file.path(out, "rld.rds"))
+
+# read in rlog object
+rld <- readRDS(file.path(out, "rld.rds"))
+
+# perform batch correction
+rld.corrected <- rld
+mat <- assay(rld)
+mm <- model.matrix(~ genotype + treatment + genotype:treatment, colData(rld))
+mat <- limma::removeBatchEffect(mat, batch = rld$batch, design = mm)
+assay(rld.corrected) <- mat
+
+# create dataframe object to use for making heatmaps
+rld.df <- assay(rld.corrected) %>% as.data.frame()
+
+rld.df$mapIds <- mapIds(x = org.Mm.eg.db,
+                       keys = rownames(rld.df),
+                       column = "SYMBOL",
+                       keytype = "ENSEMBL",
+                       multiVals = "first")
+
+## colData dataframe
+cdf <- colData(rld) %>% as.data.frame()
+# Create the group column by concatenating genotype and treatment
+cdf$group <- paste0(cdf$genotype, cdf$treatment)
+
+```
+
+# set desired sample order
+```{r}
+desired_order <- rev(c("WTnoDSS", "KOnoDSS", "WTDSS", "KODSS"))
+
+samp_order <- c() # vector of sample ids ordered as desired
+for (i in desired_order) {
+  samp <- rownames(cdf)[which(cdf$group == i)]
+  samp_order <- c(samp_order,samp)
+}
+```
+
+# Prepare lists of uniquely core-enriched genes for Wang DSS Regenerative Signature
+```{r}
+# read in files
+## KO vs WT file
+file_noDSS <- read.delim(file = file.path("data", "heatmap_input", "KOnoDSS_vs_WTnoDSS", "KO_WT_DSS_REGENERATIVE_WANG.tsv"))
+
+## KODSS vs WTDSS file
+file_withDSS <- read.delim(file = file.path("data", "heatmap_input", "KODSS_vs_WTDSS", "KODSS_WTDSS_DSS_REGENERATIVE_WANG.tsv"))
+
+# filter
+## filter and keep only genes that are core-enriched and get the vector of genes
+core_noDSS <- subset(file_noDSS, CORE.ENRICHMENT == "Yes") %>% 
+  pull("SYMBOL")
+core_withDSS <- subset(file_withDSS, CORE.ENRICHMENT == "Yes") %>% 
+  pull("SYMBOL")
+# setdiff unique to KO vs WT
+## get genes found in the noDSS GSEA run but not in the DSS GSEA run
+diff_noDSS <- setdiff(core_noDSS,core_withDSS)
+print(diff_noDSS)
+writeLines(diff_noDSS, file.path(out,"unique_KO_vs_WT.txt"))
+# setdiff unique to KODSS vs WTDSS
+## get genes found in the DSS GSEA run but not in the noDSS GSEA run
+diff_withDSS <- setdiff(core_withDSS,core_noDSS)
+print(diff_withDSS)
+writeLines(diff_withDSS, file.path(out,"unique_KODSS_vs_WTDSS.txt"))
+
+```
+
+
+```{r}
+genes_unique_KO_vs_WT <- read.delim(file.path(out, "unique_KO_vs_WT.txt"), header = F)[[1]]
+genes_unique_KODSS_vs_WTDSS <- read.delim(file.path(out, "unique_KODSS_vs_WTDSS.txt"), header = F)[[1]]
+```
+
+# Create heatmap functions
+
+## create heatmap annotation components
+```{r}
+heat_anno_vec <- c("D1"="WT","D3"="WT","Z3"="WT","MP2"="WT",
+                     "Z2"= "Smad4 IEC KO","MS1"="Smad4 IEC KO","MP1"="Smad4 IEC KO",
+                     "D7"="WT DSS","D9"="WT DSS","ZH2"="WT DSS",
+                     "D4"="Smad4 IEC KO DSS","D5"="Smad4 IEC KO DSS","D6"="Smad4 IEC KO DSS")
+  
+# HeatmapAnnotation for all samples
+samp_order.filtered <- intersect(samp_order, colnames(rld.df)) ## use this with intersect() to properly order samples in main heatmap matrix to match sample order in heatmap annotation
+
+ha = rowAnnotation(Category = heat_anno_vec[samp_order.filtered], 
+                   col = list( Category = c("WT"="#D7191C", "Smad4 IEC KO"="#ABDDA4", "WT DSS"= "#FDAE61", "Smad4 IEC KO DSS"="#2B83BA")), 
+                   annotation_legend_param = list(at = c("WT", "Smad4 IEC KO", "WT DSS", "Smad4 IEC KO DSS"), 
+                                                  labels = c("WT", expression("Smad4"^"IEC KO"), "WT DSS", 
+                                                             expression(paste("Smad4"^"IEC KO","DSS")))
+                                                  )
+                   )
+## define colors for each category
+category_colors <- c("WT"="#D7191C", "Smad4 IEC KO"="#ABDDA4", "WT DSS"= "#FDAE61", "Smad4 IEC KO DSS"="#2B83BA")
+
+
+category_label_list <- list(at = c("WT", "Smad4 IEC KO", "WT DSS", "Smad4 IEC KO DSS"), 
+       labels = c("WT", expression("Smad4"^"IEC KO"), "WT DSS", expression(paste("Smad4"^"IEC KO","DSS"))))
+```
+
+
+## create directory helper function
+```{r}
+# helper function to create output directory
+create_directory <- function(dir_path) {
+  if (!dir.exists(dir_path)) {
+    dir.create(dir_path, recursive = TRUE, showWarnings = FALSE)
+  }
+}
+```
+
+## prepare input matrix for heatmap function (all samples|full)
+```{r}
+# function assumes gene vector provided is in Mouse Symbols and df input has a "mapIds" column
+# returns a matrix that can be used as input for `Heatmap()`
+prep_ht_mat_full <- function(df, gene_list) {
+  df_cut <- df[df$mapIds %in% gene_list,]
+  rownames(df_cut) <- df_cut$mapIds
+  df_cut <- subset(df_cut, select = -c(mapIds))
+  df_cut <- df_cut[,intersect(samp_order.filtered,colnames(df_cut))]
+  ht_mat <- scale(t(df_cut))
+  
+  return(ht_mat)
+}
+
+```
+
+## prepare input matrix for heatmap function (specified subset of samples)
+```{r}
+# function assumes gene vector provided is in Mouse Symbols and df input has a "mapIds" column
+# subset_groups should be a vector of sample ids
+# returns a matrix that can be used as input for `Heatmap()`
+# intersect is used to preserve the order of sample_ids in subset_groups
+prep_ht_mat_subset <- function(df, gene_list, subset_groups) {
+  df_cut <- df[df$mapIds %in% gene_list,]
+  rownames(df_cut) <- df_cut$mapIds
+  df_cut <- subset(df_cut, select = -c(mapIds))
+  df_cut_subset <- df_cut[ ,(intersect(subset_groups,colnames(df_cut)))]
+  ht_mat_subset <- scale(t(df_cut_subset))
+  return(ht_mat_subset)
+}
+```
+
+## prepare subset HeatmapAnnotation object
+```{r}
+prep_anno_subset <- function(df, subset_groups) {
+  samp_order_subset <- intersect(subset_groups, colnames(df))
+  ##  filter the annotation vector based on the subset of samples
+  heat_anno_subset <- heat_anno_vec[samp_order_subset]
+  ## determine unique categories in the subset
+  unique_categories <- unique(heat_anno_subset)
+  
+  ## filter the annotation colors based on the unique categories
+  category_colors_subset <- category_colors[names(category_colors) %in% unique_categories]
+  
+  ## subset the category labels list
+  indices_to_keep <- which(category_label_list$at %in% unique_categories)
+  category_label_list_subset <- list(at = category_label_list$at[indices_to_keep],
+                                     labels = category_label_list$labels[indices_to_keep])
+  
+  ## create the heatmap annotation for the subset
+  ha2 <- HeatmapAnnotation(Category = heat_anno_subset,
+                           col = list(Category = category_colors_subset),
+                           annotation_legend_param = category_label_list_subset,
+                           which = "row")
+  return(ha2)
+}
+```
+
+## create heatmap object
+```{r}
+# function takes in input matrix of values for heatmap ht_mat, and a HeatmapAnnotation object ht_anno for row annotation
+create_heatmap <- function(ht_mat, ht_anno) {
+  heat <- ht_mat %>% {Heatmap(.,
+                  left_annotation = ht_anno,
+                  name = "z-score",
+                  column_names_side = 'top',
+                  rect_gp = gpar(col = "gray", lwd = 2),
+                  row_labels = rep("", nrow(.)),
+                  column_names_gp = gpar(fontsize = 12, fontface = "italic"),
+                  cluster_columns = FALSE,
+                  cluster_rows = FALSE,
+                  width = ncol(.)*unit(5,"mm"),
+                  height = nrow(.)*unit(5,"mm"))}
+  return(heat)
+}
+```
+
+## create SNR heatmap
+```{r}
+# ht_mat input is the output from `prep_ht_mat_subset()`
+# gene_set_path is the filename of the GSEA results
+# function does not need to read in Symbol_to_probe_set_mapping_details.tsv if res file uses same namespace (Mouse Symbol) as final heatmap output
+create_snr_ht <- function(ht_mat, ht_anno, gene_set_path) {
+  # read in gene set results
+  gene_set <- read.delim(file = gene_set_path, header = TRUE)
+  gene_set <- gene_set[gene_set$CORE.ENRICHMENT == "Yes",]
+  gene_set <- gene_set[,c(2,5)] # keep `SYMBOL` and `RANK METRIC SCORE`
+  # subset gene_set to only the unique genes found in ht_mat
+  gene_set_subset <- gene_set[gene_set$`SYMBOL` %in% colnames(ht_mat),]
+  
+  # reorder cols of ht_mat (cols of ht_mat are genes) so SNR is in the same order as descending SNR
+  ## descending if positive enrichment result; ascending if negative enrichment result; gene_set file already ordered
+  ht_mat <- ht_mat[,gene_set_subset$SYMBOL]
+  
+  # prep gene_set_subset for SNR heatmap
+  colnames(gene_set_subset)[2] <- "SNR"
+  rownames(gene_set_subset) <- gene_set_subset$SYMBOL
+  gene_set_subset$SYMBOL <- NULL
+  snr_mat <- t(gene_set_subset)
+  
+  # create the combined heatmap
+  alpha <- create_heatmap(ht_mat = ht_mat, ht_anno = ht_anno)
+  beta <- snr_mat %>% {
+    Heatmap(.,
+            col = c("purple", "yellow"),
+            name = "SNR",
+            column_names_side = 'top',
+            column_names_gp = gpar(fontsize = 12, fontface = "italic"),
+            cluster_columns = FALSE,
+            cluster_rows = FALSE,
+            width = ncol(.)*unit(5,"mm"),
+            height = 1*unit(5,"mm"))
+  }
+  
+  ht_list <- alpha %v% beta
+  
+  return(ht_list)
+}
+
+```
+
+
+## save heatmap to file function
+```{r}
+save_heatmap <- function(ht, out_dir, out_filename, legend_side = "left", width = 20, height = 6) {
+  ## save to pdf
+  pdf_path <- file.path(out_dir, "heatmap_pdf", paste0(out_filename, ".pdf"))
+  dirname(pdf_path) %>% create_directory()
+  pdf(file = pdf_path, width = width, height = height, title = out_filename)
+  draw(ht, heatmap_legend_side = legend_side, annotation_legend_side = legend_side)
+  dev.off()
+  ## save to png
+  png_path <- file.path(out_dir, "heatmap_png", paste0(out_filename, ".png"))
+  dirname(png_path) %>% create_directory()
+  png(filename = png_path, width = width, height = height, units = "in", res = 300)
+  draw(ht, heatmap_legend_side = legend_side, annotation_legend_side = legend_side)
+  dev.off()
+  ## save to tiff
+  tiff_path <- file.path(out_dir, "heatmap_tiff", paste0(out_filename, ".tiff"))
+  dirname(tiff_path) %>% create_directory()
+  tiff(filename = tiff_path, width = width, height = height, units = "in", res = 300)
+  draw(ht, heatmap_legend_side = legend_side, annotation_legend_side = legend_side)
+  dev.off()
+}
+```
+
+# Create Heatmaps
+
+## KOnoDSS_vs_WTnoDSS
+```{r}
+# KOnoDSS and WTnoDSS samples
+konodss_wtnodss_ids <- rownames(cdf)[which(cdf$group == "KOnoDSS" | cdf$group == "WTnoDSS")] # get ids
+samp_order_konodss_wtnodss <- samp_order[samp_order %in% konodss_wtnodss_ids] # ordered subset of samples
+```
+
+### heatmap with subsetted samples
+```{r}
+a = prep_ht_mat_subset(df = rld.df, gene_list = genes_unique_KO_vs_WT, subset_groups = samp_order_konodss_wtnodss)
+b = prep_anno_subset(df = rld.df, subset_groups = samp_order_konodss_wtnodss)
+c = create_snr_ht(ht_mat = a, ht_anno = b, gene_set_path = file.path("data","heatmap_input","KOnoDSS_vs_WTnoDSS","KO_WT_DSS_REGENERATIVE_WANG.tsv"))
+save_heatmap(ht = c, out_dir = file.path("figures", "heatmaps", "out"), out_filename = "KOnoDSS_vs_WTnoDSS_Wang_Regen_Unique")
+```
+
+## KODSS_vs_WTDSS
+```{r}
+# KODSS and WTDSS samples
+kodss_wtdss_ids <- rownames(cdf)[which(cdf$group == "KODSS" | cdf$group == "WTDSS")] # get ids
+samp_order_kodss_wtdss <- samp_order[samp_order %in% kodss_wtdss_ids] # ordered subset of samples
+```
+
+### heatmap with subsetted samples
+```{r}
+a = prep_ht_mat_subset(df = rld.df, gene_list = genes_unique_KODSS_vs_WTDSS, subset_groups = samp_order_kodss_wtdss)
+b = prep_anno_subset(df = rld.df, subset_groups = samp_order_kodss_wtdss)
+c = create_snr_ht(ht_mat = a, ht_anno = b, gene_set_path = file.path("data","heatmap_input","KODSS_vs_WTDSS","KODSS_WTDSS_DSS_REGENERATIVE_WANG.tsv"))
+save_heatmap(ht = c, out_dir = file.path("figures", "heatmaps", "out"), out_filename = "KODSS_vs_WTDSS_Wang_Regen_Unique")
+
+```
+
+_____
+
+# Session Info
+```{r}
+sessionInfo()
+```
+
